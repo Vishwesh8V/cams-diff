@@ -12,21 +12,7 @@
   <sub><b>(A) Training.</b> Continuous diffusion is coupled to discrete representation masking through one token-wise adaptive noise schedule; per-token loss feeds back into the schedule, which recalibrates both corruption modes together. <b>(B) Inference.</b> Trajectory informativeness allocates a reduced budget of <code>K</code> reverse steps non-uniformly across the <code>T = 2000</code> denoising trajectory.</sub>
 </p>
 
-<p align="center">
-  <img src="assets/reverse_trajectory.gif" width="100%" alt="CAMS-Diff reverse trajectory: pure noise to molecule">
-</p>
-
-<p align="center">
-  <sub>The reverse trajectory. Left: the token-wise latent under Gaussian corruption with coupled representation masking. Right: the SMILES readout decoded from the predicted clean latent, resolving from an unparsable fragment through an open ring closure to an exact match. Bottom: the <code>K = 4</code> retained timesteps selected by trajectory importance. Schematic illustration of the mechanism, not a logged sampler run.</sub>
-</p>
-
----
-
-## Status of this release
-
-This repository accompanies the submission as a **reference for the method**, not as a runnable release. It contains the model and diffusion source so reviewers can inspect how the two contributions are implemented, but training configurations, data preparation, checkpoints, and a verified end-to-end pipeline are **not** included, and the code should not be expected to run as-is. The complete release will follow on acceptance.
-
-Please raise questions in the OpenReview thread rather than here, to preserve double-blind review.
+> Please raise questions in the OpenReview thread rather than here, to preserve double-blind review.
 
 ---
 
