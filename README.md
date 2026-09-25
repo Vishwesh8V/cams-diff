@@ -18,11 +18,11 @@
 
 ## Overview
 
-Molecular translation covers molecule captioning, text-guided generation, forward reaction prediction, and retrosynthesis. Continuous sequence diffusion gives all four a common conditional denoising formulation over SMILES and text. Two problems remain open in that formulation; CAMS-Diff addresses one at training time and one at inference time.
+Molecular translation covers molecule captioning, text-guided generation, forward reaction prediction, and retrosynthesis. Continuous sequence diffusion gives all four a common conditional denoising formulation over SMILES and text. Two questions remain underexplored in that formulation: how corruption should vary across token positions during training, and where denoising steps should fall along the reverse trajectory at inference. CAMS-Diff addresses one at each end.
 
-**L1 — Continuous corruption leaves low-noise tokens locally recoverable.** At low noise levels a continuous latent still carries substantial information about the underlying discrete token, so the denoiser can read a token off its own position instead of reconstructing it from context. That matters for SMILES in particular, where correctness depends on non-local structure: ring-closure digits, nested branches, matched parentheses.
+**L1 — Local token recoverability can reduce reliance on sequence context and conditioning.** At low noise levels a continuous representation may retain substantial information about the underlying discrete token, letting the denoiser reconstruct a position with limited reliance on the surrounding sequence or on the conditioning input. That local recovery shortcut is undesirable for SMILES, where correct reconstruction can depend on non-local dependencies such as ring closures and nested branches. Token-wise adaptive noising changes *how strongly* individual positions are corrupted, but does not explicitly remove the locally available evidence; masking and absorbing-state corruption remove it directly in text diffusion, but the interaction between discrete masking and token-wise adaptive continuous corruption has not been examined.
 
-**L2 — Reduced-step sampling is sensitive to *where* evaluations are kept.** Deployment needs the 2000-step reverse trajectory cut to a handful of denoiser calls. Uniform subsampling is the default, and quality degrades under it — not because fewer steps are used, but because informative regions of a non-uniform trajectory get skipped.
+**L2 — Reduced-step sampling is sensitive to *where* evaluations are kept.** Inference needs many sequential denoiser calls, so deployment depends on cutting the 2000-step reverse trajectory to a handful. Uniform subsampling is the common choice, and quality degrades under it — evidence that the loss comes from which steps are discarded rather than from using fewer steps alone. Trajectory-informed placement under a fixed budget remains unexplored for molecular translation.
 
 Both are answered with the same principle: **let the learned denoising dynamics decide.** They govern corruption during training, and timestep selection at inference.
 
@@ -32,7 +32,7 @@ Both are answered with the same principle: **let the learned denoising dynamics 
 
 ### 1. Coupled adaptive mixed-space diffusion (training)
 
-Gaussian diffusion evolves a continuous latent while a discrete mask variable decides whether each position is observed or replaced by a learned mask representation `m`. The point is not that the two corruption modes are mixed — that has precedent in text diffusion — but that they are **coupled to one schedule**.
+Gaussian diffusion evolves a continuous latent while a discrete mask variable decides whether each position is observed or replaced by a learned mask representation `m`. Masking removes the direct local evidence and pushes reconstruction back onto the remaining sequence and the conditioning input. The point is not that the two corruption modes are mixed — that has precedent in text diffusion — but that they are **coupled to one schedule**.
 
 The masking probability is read directly off the learned token-wise Gaussian corruption coefficient:
 
@@ -43,9 +43,9 @@ The masking probability is read directly off the learned token-wise Gaussian cor
 z̃ᵢₜ = (1 − ρᵢₜ) · zᵢₜ + ρᵢₜ · m
 ```
 
-with `η = 0.5` by default. Recalibrating `βᵢₜ` therefore recalibrates the masking process with it: positions the model finds hard to denoise receive both stronger Gaussian corruption and a higher chance of having their local evidence removed. Where the projected schedule plateaus, `βᵢₜ = 0`, so masking and denoising weight both vanish at that position–timestep pair.
+where `η` controls masking strength, `η = 0.5` by default. Recalibrating `βᵢₜ` therefore recalibrates `ϖᵢₜ` with it: positions the model finds hard to denoise receive both stronger Gaussian corruption and a higher chance of having their local evidence removed. Where the projected schedule plateaus, `βᵢₜ = 0`, so masking and denoising weight both vanish at that position–timestep pair.
 
-Because the same masking law appears in both the forward and generative factorizations, its probability terms cancel in the variational ratio. The Gaussian posterior and the token-wise SNR weights `wᵢₜ = ½(SNRᵢₜ₋₁ − SNRᵢₜ)` are unchanged, and the objective keeps its usual form with the clean-state prediction formed from the mixed observation. Since boundary noise levels are shared across positions, every position receives the same total SNR-drop weight — the token-wise schedule changes *where* that weight sits along the trajectory, not how much of it there is.
+Because the same masking law appears in both the forward and generative factorizations, its probability terms cancel in the variational ratio. The Gaussian posterior and the token-wise SNR weights `wᵢₜ = ½(SNRᵢₜ₋₁ − SNRᵢₜ)` are unchanged, and the objective keeps its usual form with the clean-state prediction formed from the mixed observation. Since boundary noise levels are shared across positions, every position receives the same total SNR-drop weight — the token-wise schedule redistributes denoising weight along the trajectory rather than changing its total amount.
 
 ### 2. Trajectory-informed reduced-step decoding (inference)
 
@@ -65,77 +65,13 @@ The schedule is built **once, offline**, from validation trajectories and reused
 
 ## Results
 
-Full-step inference uses `T = 2000`. Reproduced baselines are marked; where multiple runs exist, results are mean ± std over three seeds.
+CAMS-Diff is evaluated across five settings: molecule captioning, text-guided generation, forward reaction prediction, retrosynthesis, and zero-shot transfer. Full-step inference uses `T = 2000`.
 
-### Molecule captioning — M3-20M
+Across these settings it improves molecular and semantic recovery over autoregressive, sequence-diffusion, and graph-diffusion baselines, at a comparable or smaller parameter count, and transfers to an unseen generation benchmark without task-specific fine-tuning. Controlled ablations isolate both mechanisms: coupling the two corruption modes to one schedule improves over adaptive noising alone, masking alone, and their uncoupled combination, while trajectory-informed timestep selection improves over uniform subsampling at matched budgets — same checkpoint, same sampler, same number of denoiser evaluations. Two-step captioning reaches quality comparable to full-step BiMol-Diff using two denoiser evaluations instead of 2000, an approximately 245× wall-clock speedup under matched single-A100 timing. Gains widen as instructions and target sequences get longer.
 
-| Metric | Text+Chem T5 | DiffuSeq | TGM-DLM | BiMol-Diff | BiMol-Diff† | **CAMS-Diff** |
-|---|---|---|---|---|---|---|
-| #P | 223M | 91M | 125M | 63M | 63M | **63M** |
-| BLEU ↑ | 0.542 | 0.532 | 0.467 | 0.567 | 0.557 | **0.610** |
-| chrF++ ↑ | 0.701 | 0.708 | 0.689 | **0.734** | 0.710 | 0.705 |
-| METEOR ↑ | 0.648 | 0.601 | 0.589 | 0.626 | 0.632 | **0.740** |
-| BERTScore-F1 ↑ | 0.728 | 0.812 | 0.779 | 0.843 | 0.838 | **0.861** |
-| MAUVE ↑ | 0.866 | 0.887 | 0.856 | 0.925 | 0.913 | **0.927** |
+Per-metric numbers, baselines, and the full ablation breakdown are in the paper.
 
-### Text-guided generation — ChEBI-20
-
-| Metric | MolT5-Large | 3M-Diffusion | UTGDiff† | BiMol-Diff⋆ | TGM-DLM | **CAMS-Diff** |
-|---|---|---|---|---|---|---|
-| MACCS ↑ | 0.834 | 0.557 | 0.867 | 0.883 | 0.854 | **0.916** |
-| RDK ↑ | 0.746 | 0.380 | 0.763 | 0.785 | 0.739 | **0.811** |
-| Morgan ↑ | 0.684 | 0.302 | 0.695 | 0.758 | 0.688 | **0.790** |
-| BLEU ↑ | **0.854** | 0.507 | 0.817 | 0.820 | 0.826 | 0.832 |
-| Exact ↑ | **0.311** | 0.003 | 0.227 | 0.252 | 0.242 | 0.232 |
-| Valid ↑ | **0.905** | 0.595 | 0.856 | 0.872 | 0.871 | 0.748 |
-
-`UTGDiff†` is the non-pretrained setting, for a controlled comparison with CAMS-Diff, which also uses no molecular pretraining.
-
-### Reaction prediction — Mol-Instructions
-
-| Model | Retro. Exact ↑ | Retro. MACCS ↑ | Retro. Morgan ↑ | Fwd. Exact ↑ | Fwd. MACCS ↑ | Fwd. Morgan ↑ |
-|---|---|---|---|---|---|---|
-| InstructMol-GS (6.9B) | 0.407 | 0.852 | 0.714 | 0.407 | 0.878 | 0.741 |
-| BioT5 (252M) | 0.480 | 0.904 | 0.810 | 0.684 | 0.954 | 0.890 |
-| UTGDiff* (125M) | 0.462 | 0.891 | 0.789 | 0.828 | 0.978 | 0.948 |
-| **CAMS-Diff (180M)** | **0.541** | **0.931** | **0.873** | **0.830** | **0.985** | **0.967** |
-
-### Zero-shot transfer — PCDes
-
-The ChEBI-20-trained generation model applied directly to PCDes, with no task-specific fine-tuning.
-
-| Metric | MolT5-base | BioT5-base | TGM-DLM | 3M-Diffusion | UTGDiff | **CAMS-Diff** |
-|---|---|---|---|---|---|---|
-| MACCS ↑ | 0.733 | 0.737 | 0.741 | 0.495 | 0.763 | **0.810** |
-| RDK ↑ | 0.651 | 0.646 | 0.667 | 0.332 | 0.675 | **0.746** |
-| Morgan ↑ | 0.621 | 0.595 | 0.612 | 0.242 | 0.623 | **0.733** |
-| Exact ↑ | 0.204 | 0.242 | 0.221 | 0.015 | 0.386 | **0.427** |
-
----
-
-## Ablations
-
-Both mechanisms are isolated under matched conditions.
-
-**Coupling (L1).** Masking and adaptive noising each help on their own; combining them helps more; coupling them to one schedule helps most.
-
-| Variant | Cap. BLEU ↑ | Cap. BERT-F1 ↑ | Gen. MACCS ↑ | Gen. Morgan ↑ |
-|---|---|---|---|---|
-| Uniform | 0.523 | 0.780 | 0.874 | 0.722 |
-| + Mixed space | 0.546 | 0.810 | 0.870 | 0.748 |
-| + Adaptive noising | 0.560 | 0.830 | 0.889 | 0.750 |
-| Uncoupled | 0.597 | 0.841 | 0.909 | 0.768 |
-| **Coupled (CAMS-Diff)** | **0.610** | **0.861** | **0.916** | **0.790** |
-
-The uncoupled variant uses adaptive noising with a *fixed* masking probability matched to CAMS-Diff's overall masking rate but independent of `βᵢₜ`. The gap between the last two rows is the contribution of coupling itself. Performance varies smoothly with `η`, and the default `η = 0.5` sits in the strongest MACCS region across generation and both reaction directions.
-
-**Step allocation (L2).** At matched budgets — same checkpoint, same sampler, same number of denoiser evaluations — trajectory-informed placement beats uniform subsampling by up to 1.81 MACCS points on generation, and 1.90 / 2.70 validity points on retrosynthesis with DPM-Solver++ / DDIM. Early-, middle-, and late-biased controls show that no fixed region of the reverse trajectory reproduces it; the useful region depends on the budget. At `K = 1` the two schedules necessarily coincide, since there is no allocation freedom.
-
-**Two-step captioning.** `K = 2` reaches 56.8 BLEU against 55.7 for reproduced full-step BiMol-Diff — two denoiser evaluations instead of 2000, ≈245× wall-clock speedup under matched single-A100 timing.
-
-**Difficulty scaling.** Gains widen as generation gets harder. Exact match improves over the strongest baseline by 13.7 / 16.3 / 20.4 points across the 65–96, 97–128, and 129–160 instruction-length bins. In the longest-sequence regime, reaction exact match is 0.73 vs 0.56 for forward prediction and 0.51 vs 0.33 for retrosynthesis.
-
-**Known limitation.** Validity trails UTGDiff (0.748 vs 0.856). The residual errors are overwhelmingly *serialization* failures rather than chemistry: unpaired ring labels (43.95%), unclosed branches (41.35%), extra closing parentheses (37.86%), against only 4.87% invalid atomic valence — categories are non-exclusive. This motivates future corruption that treats coupled SMILES constraints as structured units rather than independently corrupted positions.
+**Known limitation.** SMILES validity trails the strongest graph-diffusion baseline. The residual errors are overwhelmingly *serialization* failures rather than chemistry — unpaired ring labels, unclosed branches, and extra closing parentheses dominate, while invalid atomic valence is rare. This motivates future corruption that treats coupled SMILES constraints as structured units rather than independently corrupted positions.
 
 ---
 
@@ -182,21 +118,3 @@ Two model configurations are used: a 63M encoder–decoder for captioning (6 enc
 | PCDes | Zero-shot generation | standard | 10,500 / 1,500 / 3,000 |
 
 ChEBI-20 and both reaction splits follow the UTGDiff protocol so the comparisons share a benchmark setup. For the reaction tasks, the 10K validation examples are held out from the original training partition and used for validation and trajectory-based schedule construction; test sets are never used during schedule construction. PCDes is used only for zero-shot evaluation and never updates model parameters.
-
----
-
-## Citation
-
-```bibtex
-@inproceedings{camsdiff2027,
-  title     = {{CAMS-Diff}: Coupled Adaptive Mixed-Space Diffusion for Molecular Translation},
-  author    = {Anonymous},
-  booktitle = {Submitted to the International Conference on Learning Representations},
-  year      = {2027},
-  note      = {Under review}
-}
-```
-
-## Acknowledgements
-
-Builds on the continuous sequence-diffusion line of work — Diffusion-LM, DiffuSeq, SeqDiffuSeq, TGM-DLM, and BiMol-Diff — and is evaluated against UTGDiff, BioT5+, and related molecular translation baselines. `generation/transformers/` vendors a fork of HuggingFace Transformers.
